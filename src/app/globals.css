@@ -134,6 +134,25 @@ body {
   animation: loginFadeIn 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+/* 404 — magnifying glass "scanning for a lead it can't find" */
+@keyframes scoutSweep {
+  0%, 100% { transform: rotate(-8deg) scale(1); }
+  50% { transform: rotate(8deg) scale(1.06); }
+}
+
+.animate-scout-sweep {
+  animation: scoutSweep 3.2s ease-in-out infinite;
+}
+
+@keyframes scoutPing {
+  0% { transform: scale(0.9); opacity: 0.6; }
+  75%, 100% { transform: scale(1.6); opacity: 0; }
+}
+
+.animate-scout-ping {
+  animation: scoutPing 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
 /* Subtle film-grain texture over dark hero/CTA sections — pure SVG noise, no image asset. */
 .grain-overlay {
   position: absolute;

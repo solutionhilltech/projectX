@@ -5,11 +5,18 @@ import { isValidSessionToken, SESSION_COOKIE } from "@/lib/auth";
 const PUBLIC_PATHS = new Set(["/", "/login", "/api/auth/login"]);
 
 export function proxy(request: NextRequest) {
+  const signedIn = isValidSessionToken(request.cookies.get(SESSION_COOKIE)?.value);
+
+  // Already signed in and heading to the login form — skip straight to the dashboard.
+  if (request.nextUrl.pathname === "/login" && signedIn) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+
   if (PUBLIC_PATHS.has(request.nextUrl.pathname)) {
     return NextResponse.next();
   }
 
-  if (isValidSessionToken(request.cookies.get(SESSION_COOKIE)?.value)) {
+  if (signedIn) {
     return NextResponse.next();
   }
 

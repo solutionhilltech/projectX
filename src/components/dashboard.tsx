@@ -6,7 +6,7 @@ import { AgentConsole } from "@/components/agent-console";
 import { AnalyticsView } from "@/components/analytics-view";
 import { BusinessGrid } from "@/components/business-grid";
 import { ScoutForm } from "@/components/scout-form";
-import { SettingsModal } from "@/components/settings-modal";
+import { SettingsView } from "@/components/settings-view";
 import { Sidebar, type DashboardView } from "@/components/sidebar";
 import { ToastContainer, type ToastItem, type ToastType } from "@/components/toast";
 import { useAgentStream } from "@/hooks/use-agent-stream";
@@ -15,7 +15,7 @@ import type { BackendStatus, Business, SettingsForm } from "@/lib/types";
 
 type DataTab = "with_website" | "no_website" | "scouted";
 
-const VIEWS: DashboardView[] = ["scout", "data", "analytics"];
+const VIEWS: DashboardView[] = ["scout", "data", "analytics", "settings"];
 const TABS: DataTab[] = ["with_website", "no_website", "scouted"];
 
 /** Swallows the abort that a cancelled effect triggers; logs anything real. */
@@ -31,7 +31,6 @@ function settingsFormFor(status: BackendStatus | null): SettingsForm {
   if (!status) {
     return {
       openrouter_api_key: "",
-      mongodb_uri: "",
       search_provider: "google",
       google_places_api_key: "",
       serper_api_key: "",
@@ -42,7 +41,6 @@ function settingsFormFor(status: BackendStatus | null): SettingsForm {
   }
   return {
     openrouter_api_key: "",
-    mongodb_uri: status.database.connected_to_mongodb ? "" : "mongodb://localhost:27017",
     search_provider: status.config.search_provider,
     google_places_api_key: "",
     serper_api_key: "",
@@ -69,7 +67,6 @@ export function Dashboard({ brand }: { brand: ReactNode }) {
     return VIEWS.includes(v as DashboardView) ? (v as DashboardView) : "scout";
   });
   const [status, setStatus] = useState<BackendStatus | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   /** Keeps the active view/tab in the URL (?view=&tab=) so a refresh lands back on the same one. */
@@ -191,7 +188,10 @@ export function Dashboard({ brand }: { brand: ReactNode }) {
 
   const { logs, searching, start, stop } = useAgentStream({
     onBusinessSaved: addBusiness,
-    onComplete: loadBusinesses,
+    onComplete: useCallback(async () => {
+      await loadBusinesses();
+      setActiveView("data");
+    }, [loadBusinesses, setActiveView]),
   });
 
   const handleStart = (e: FormEvent) => {
@@ -209,7 +209,6 @@ export function Dashboard({ brand }: { brand: ReactNode }) {
         activeView={activeView}
         onChangeView={setActiveView}
         status={status}
-        onOpenSettings={() => setShowSettings(true)}
         brand={brand}
       />
 
@@ -268,27 +267,27 @@ export function Dashboard({ brand }: { brand: ReactNode }) {
         )}
 
         {activeView === "analytics" && <AnalyticsView businesses={savedBusinesses} />}
-      </main>
 
-      {showSettings && (
-        <SettingsModal
-          initialForm={settingsFormFor(status)}
-          onClose={() => setShowSettings(false)}
-          onSaved={async () => {
-            await loadStatus();
-            showToast("Settings saved", "success");
-          }}
-        />
-      )}
+        {activeView === "settings" && (
+          <SettingsView
+            initialForm={settingsFormFor(status)}
+            status={status}
+            onSaved={async () => {
+              await loadStatus();
+              showToast("Settings saved", "success");
+            }}
+          />
+        )}
+      </main>
 
       <footer className="md:hidden glass-panel border-t border-[var(--border)] py-2.5 px-4 text-[11px] text-[var(--muted-foreground)] flex items-center justify-between mt-auto">
         <span>Project X Business Scout 1.0</span>
         {status && (
-          <span className="flex items-center">
+          <span className="flex items-center" title={status.database.error ?? undefined}>
             <span
-              className={`w-1.5 h-1.5 rounded-full mr-1.5 ${status.database.connected_to_mongodb ? "bg-emerald-600" : "bg-amber-600"}`}
+              className={`w-1.5 h-1.5 rounded-full mr-1.5 ${status.database.connected ? "bg-emerald-600" : "bg-red-600"}`}
             />
-            {status.database.connected_to_mongodb ? "MongoDB Online" : "JSON Fallback"}
+            {status.database.connected ? "MongoDB Online" : "MongoDB Offline"}
           </span>
         )}
       </footer>

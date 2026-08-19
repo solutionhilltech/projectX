@@ -1,14 +1,15 @@
 import { uploadImage } from "@/lib/uploadthing";
 
 /**
- * In the Docker image (USE_SERVERLESS_CHROMIUM=true), Chromium ships
- * Brotli-compressed inside @sparticuz/chromium and is only inflated to
- * /tmp at container startup — far smaller in the image than a bundled
- * browser. Local dev keeps using plain `puppeteer`, which downloads and
- * manages its own Chrome install.
+ * In the Docker image (USE_SERVERLESS_CHROMIUM=true) and on Vercel
+ * (process.env.VERCEL, same detection next.config.ts uses), Chromium
+ * ships Brotli-compressed inside @sparticuz/chromium and is only
+ * inflated to /tmp at runtime — neither environment has a full Chrome
+ * install available. Local dev keeps using plain `puppeteer`, which
+ * downloads and manages its own Chrome install.
  */
 async function launchBrowser() {
-  if (process.env.USE_SERVERLESS_CHROMIUM === "true") {
+  if (process.env.USE_SERVERLESS_CHROMIUM === "true" || process.env.VERCEL) {
     const [{ default: puppeteer }, { default: chromium }] = await Promise.all([
       import("puppeteer-core"),
       import("@sparticuz/chromium"),

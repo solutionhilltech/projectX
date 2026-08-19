@@ -1,125 +1,62 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
-import path from "path";
 import { MongoClient, type Db } from "mongodb";
 import type { Business, SettingsForm } from "@/lib/types";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const BUSINESSES_FILE = path.join(DATA_DIR, "businesses.json");
-const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
-const AUTH_FILE = path.join(DATA_DIR, "auth.json");
-
-async function readJson<T>(file: string, fallback: T): Promise<T> {
-  try {
-    return JSON.parse(await readFile(file, "utf-8"));
-  } catch {
-    return fallback;
-  }
-}
-
-async function writeJson(file: string, data: unknown): Promise<void> {
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(file, JSON.stringify(data, null, 2));
-}
-
-export function businessesFilePath(): string {
-  return BUSINESSES_FILE;
-}
-
-async function fileGetBusinesses(): Promise<Business[]> {
-  return readJson<Business[]>(BUSINESSES_FILE, []);
-}
-
-async function fileSaveBusiness(business: Business): Promise<void> {
-  const businesses = await fileGetBusinesses();
-  if (businesses.some((b) => b.place_id === business.place_id)) return;
-  await writeJson(BUSINESSES_FILE, [business, ...businesses]);
-}
-
-async function fileUpdateBusiness(place_id: string, patch: Partial<Business>): Promise<void> {
-  const businesses = await fileGetBusinesses();
-  const next = businesses.map((b) => (b.place_id === place_id ? { ...b, ...patch } : b));
-  await writeJson(BUSINESSES_FILE, next);
-}
-
-async function fileDeleteBusiness(place_id: string): Promise<void> {
-  const businesses = await fileGetBusinesses();
-  await writeJson(BUSINESSES_FILE, businesses.filter((b) => b.place_id !== place_id));
+function mongoUri(): string {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) throw new Error("MONGODB_URI is not set.");
+  return uri;
 }
 
 // Cached across requests (and hot reloads) so we don't open a new connection per call.
 // Single-flighted: concurrent callers await the same in-flight connect instead of
 // each independently closing/replacing the shared client (that race threw
 // MongoTopologyClosedError when two requests landed at once).
-let cachedUri: string | null = null;
 let clientPromise: Promise<MongoClient> | null = null;
 
-async function getDb(uri: string): Promise<Db> {
-  if (cachedUri !== uri || !clientPromise) {
-    cachedUri = uri;
-    const previous = clientPromise;
+async function getDb(): Promise<Db> {
+  if (!clientPromise) {
     clientPromise = (async () => {
-      if (previous) await (await previous).close();
-      const client = new MongoClient(uri);
+      const client = new MongoClient(mongoUri());
       await client.connect();
       return client;
     })();
   }
-  const client = await clientPromise;
-  return client.db();
+  try {
+    const client = await clientPromise;
+    return client.db();
+  } catch (err) {
+    clientPromise = null;
+    throw err;
+  }
 }
 
-export async function getDatabaseStatus(): Promise<{
-  connected_to_mongodb: boolean;
-  storage_type: "mongodb" | "file";
-  file_path: string | null;
-}> {
-  const settings = await getSettings();
-  if (settings.mongodb_uri) {
-    try {
-      const db = await getDb(settings.mongodb_uri);
-      await db.command({ ping: 1 });
-      return { connected_to_mongodb: true, storage_type: "mongodb", file_path: null };
-    } catch (err) {
-      console.error("MongoDB unreachable, using file storage:", err);
-    }
+export async function getDatabaseStatus(): Promise<{ connected: boolean; error: string | null }> {
+  try {
+    const db = await getDb();
+    await db.command({ ping: 1 });
+    return { connected: true, error: null };
+  } catch (err) {
+    return { connected: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return { connected_to_mongodb: false, storage_type: "file", file_path: BUSINESSES_FILE };
 }
 
 export async function getBusinesses(): Promise<Business[]> {
-  const settings = await getSettings();
-  if (settings.mongodb_uri) {
-    try {
-      const db = await getDb(settings.mongodb_uri);
-      const docs = await db
-        .collection<Business>("businesses")
-        .find()
-        .project({ _id: 0 })
-        .sort({ queried_at: -1 })
-        .toArray();
-      return docs as unknown as Business[];
-    } catch (err) {
-      console.error("MongoDB unreachable, using file storage:", err);
-    }
-  }
-  return fileGetBusinesses();
+  const db = await getDb();
+  const docs = await db
+    .collection<Business>("businesses")
+    .find()
+    .project({ _id: 0 })
+    .sort({ queried_at: -1 })
+    .toArray();
+  return docs as unknown as Business[];
 }
 
 /** Upserts by place_id — no-op if that business is already saved. */
 export async function saveBusiness(business: Business): Promise<void> {
-  const settings = await getSettings();
-  if (settings.mongodb_uri) {
-    try {
-      const db = await getDb(settings.mongodb_uri);
-      await db
-        .collection("businesses")
-        .updateOne({ place_id: business.place_id }, { $setOnInsert: business }, { upsert: true });
-      return;
-    } catch (err) {
-      console.error("MongoDB unreachable, using file storage:", err);
-    }
-  }
-  await fileSaveBusiness(business);
+  const db = await getDb();
+  await db
+    .collection("businesses")
+    .updateOne({ place_id: business.place_id }, { $setOnInsert: business }, { upsert: true });
 }
 
 export async function getBusinessesWithWebsite(): Promise<Business[]> {
@@ -136,32 +73,14 @@ export async function updateRedesignResult(
 
 /** Partial update by place_id — used by the redesign and WhatsApp-delivery steps. */
 export async function updateBusiness(place_id: string, patch: Partial<Business>): Promise<void> {
-  const settings = await getSettings();
-  if (settings.mongodb_uri) {
-    try {
-      const db = await getDb(settings.mongodb_uri);
-      await db.collection("businesses").updateOne({ place_id }, { $set: patch });
-      return;
-    } catch (err) {
-      console.error("MongoDB unreachable, using file storage:", err);
-    }
-  }
-  await fileUpdateBusiness(place_id, patch);
+  const db = await getDb();
+  await db.collection("businesses").updateOne({ place_id }, { $set: patch });
 }
 
 /** Removes a business from the saved database. */
 export async function deleteBusiness(place_id: string): Promise<void> {
-  const settings = await getSettings();
-  if (settings.mongodb_uri) {
-    try {
-      const db = await getDb(settings.mongodb_uri);
-      await db.collection("businesses").deleteOne({ place_id });
-      return;
-    } catch (err) {
-      console.error("MongoDB unreachable, using file storage:", err);
-    }
-  }
-  await fileDeleteBusiness(place_id);
+  const db = await getDb();
+  await db.collection("businesses").deleteOne({ place_id });
 }
 
 /** Step 3 candidates: redesign finished, not yet successfully messaged. */
@@ -174,7 +93,6 @@ export async function getBusinessesReadyForWhatsapp(): Promise<Business[]> {
 
 const DEFAULT_SETTINGS: SettingsForm = {
   openrouter_api_key: "",
-  mongodb_uri: "",
   search_provider: "google",
   google_places_api_key: "",
   serper_api_key: "",
@@ -183,13 +101,14 @@ const DEFAULT_SETTINGS: SettingsForm = {
   stitch_refresh_token: "",
 };
 
+/** Single settings document, same pattern as the single auth_users record. */
 export async function getSettings(): Promise<SettingsForm> {
-  const stored = await readJson<SettingsForm>(SETTINGS_FILE, DEFAULT_SETTINGS);
+  const db = await getDb();
+  const stored = (await db.collection<SettingsForm>("settings").findOne({}, { projection: { _id: 0 } })) ?? DEFAULT_SETTINGS;
   // .env.local seeds these until the user saves overrides via Settings.
   return {
     ...stored,
     openrouter_api_key: stored.openrouter_api_key || process.env.OPENROUTER_API_KEY || "",
-    mongodb_uri: stored.mongodb_uri || process.env.MONGODB_URI || "",
     google_places_api_key: stored.google_places_api_key || process.env.GOOGLE_PLACES_API_KEY || "",
     whatsapp_access_token: stored.whatsapp_access_token || process.env.WHATSAPP_ACCESS_TOKEN || "",
     whatsapp_phone_number_id: stored.whatsapp_phone_number_id || process.env.WHATSAPP_PHONE_NUMBER_ID || "",
@@ -204,7 +123,8 @@ export async function saveSettings(patch: Partial<SettingsForm>): Promise<Settin
   for (const [key, value] of Object.entries(patch) as [keyof SettingsForm, string][]) {
     if (value !== "") next[key] = value;
   }
-  await writeJson(SETTINGS_FILE, next);
+  const db = await getDb();
+  await db.collection("settings").updateOne({}, { $set: next }, { upsert: true });
   return next;
 }
 
@@ -218,20 +138,9 @@ export interface AuthUser {
  * The single operator credential for the login page, stored as a
  * scrypt(password, salt) hash — never plain text. Seed it with
  * `node scripts/seed-admin.mjs <username> <password>`, which writes into the
- * `auth_users` collection of the database `mongodb_uri` points at.
- * Without `mongodb_uri` configured, it falls back to reading the same shape
- * from data/auth.json (same pattern as businesses/settings).
+ * `auth_users` collection of the database `MONGODB_URI` points at.
  */
 export async function getAuthUser(): Promise<AuthUser | null> {
-  const settings = await getSettings();
-  if (settings.mongodb_uri) {
-    try {
-      const db = await getDb(settings.mongodb_uri);
-      const doc = await db.collection<AuthUser>("auth_users").findOne({}, { projection: { _id: 0 } });
-      if (doc) return doc;
-    } catch (err) {
-      console.error("MongoDB unreachable, using file storage:", err);
-    }
-  }
-  return readJson<AuthUser | null>(AUTH_FILE, null);
+  const db = await getDb();
+  return db.collection<AuthUser>("auth_users").findOne({}, { projection: { _id: 0 } });
 }
