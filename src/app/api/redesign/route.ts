@@ -6,6 +6,11 @@ import { generateDesign } from "@/lib/stitch";
 import { sendRedesignReadyMessage } from "@/lib/whatsapp";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs"; // puppeteer needs Node APIs, not Edge
+// Crawl + vision LLM + Stitch (with retries) routinely runs well past
+// Vercel's default timeout. Raise to your plan's actual cap in the Vercel
+// dashboard/project settings — this is a floor, not a guarantee.
+export const maxDuration = 300;
 
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
