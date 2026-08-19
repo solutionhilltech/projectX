@@ -6,6 +6,7 @@ export async function fetchStatus(signal?: AbortSignal): Promise<BackendStatus> 
   return res.json();
 }
 
+
 export async function fetchBusinesses(signal?: AbortSignal): Promise<Business[]> {
   const res = await fetch("/api/businesses", { signal });
   if (!res.ok) throw new Error(`Businesses request failed: ${res.status}`);
