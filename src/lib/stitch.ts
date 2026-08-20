@@ -100,21 +100,29 @@ async function getAccessToken(refreshToken: string): Promise<string> {
   return (await res.json()).access_token;
 }
 
+/** Narrower than any real screen design — below this it's a swatch, not a page. */
+const MIN_PAGE_WIDTH = 320;
+
 /**
- * Stitch returns supporting imagery (square illustration/style tiles, a
- * landscape banner) in the same design.screens array as the actual page
- * render. The page is strongly portrait — the extras are square or landscape.
- * Falls back to everything if nothing looks page-shaped, so a layout we
- * haven't seen can never yield zero images.
- * ponytail: aspect-ratio heuristic, swap for a real type field if Stitch adds one.
+ * Stitch mixes supporting imagery into the same design.screens array as the
+ * actual page render: square illustration tiles, landscape banners, and
+ * design-system colour swatches with degenerate sizes like 2x24. A page render
+ * is at least a phone wide and taller than it is wide.
+ *
+ * When nothing matches, fall back to the single largest screen rather than
+ * everything — sending a 2px swatch to a business is worse than a wrong crop.
+ * ponytail: size heuristic, swap for a real type field if Stitch adds one.
  */
 function pageLikeScreens(screens: StitchScreen[]): StitchScreen[] {
+  const area = (s: StitchScreen) => (Number(s.width) || 0) * (Number(s.height) || 0);
   const pages = screens.filter((s) => {
     const w = Number(s.width) || 0;
     const h = Number(s.height) || 0;
-    return w > 0 && h / w >= 1.5;
+    return w >= MIN_PAGE_WIDTH && h / w >= 1.2;
   });
-  return pages.length > 0 ? pages : screens;
+  if (pages.length > 0) return pages;
+  const largest = [...screens].sort((a, b) => area(b) - area(a))[0];
+  return largest ? [largest] : [];
 }
 
 /** Self-check: page renders survive the filter, supporting imagery does not. */
@@ -122,9 +130,17 @@ export function runScreenFilterSelfCheck(): boolean {
   const page = { width: "780", height: "8846" };
   const tile = { width: "1024", height: "1024" };
   const banner = { width: "1264", height: "848" };
-  const mixed = pageLikeScreens([tile, banner, page, tile]);
-  const onlyTiles = pageLikeScreens([tile, banner]);
-  return mixed.length === 1 && mixed[0] === page && onlyTiles.length === 2;
+  const swatch = { width: "2", height: "24" };
+
+  const mixed = pageLikeScreens([tile, swatch, banner, page, tile]);
+  const swatchesOnly = pageLikeScreens([swatch, swatch]);
+  const noPages = pageLikeScreens([tile, banner]);
+
+  return (
+    mixed.length === 1 && mixed[0] === page &&      // only the real page survives
+    swatchesOnly.length === 1 &&                    // degenerate sizes never multiply
+    noPages.length === 1 && noPages[0] === banner   // falls back to the largest
+  );
 }
 
 function screensToImageUrls(screens: StitchScreen[]): string[] {
@@ -257,7 +273,9 @@ export async function generateDesign(params: {
       }
 
       const components = reply?.outputComponents ?? [];
-      screens = components.find((c) => c.design?.screens?.length)?.design?.screens ?? [];
+      // Across every design component, not just the first: when a design system
+      // comes back too, the page render is not reliably the first one.
+      screens = components.flatMap((c) => c.design?.screens ?? []);
       if (screens.length > 0) break;
 
       const text = components.map((c) => c.text).filter(Boolean).join(" ").trim();

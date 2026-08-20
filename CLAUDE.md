@@ -13,7 +13,7 @@ API route runs its whole step synchronously inside the request:
 
 ```
 /api/search    LLM search plan → places provider → save    (SSE stream to the UI)
-/api/redesign  crawl+screenshot → vision brief → Stitch → persist → WhatsApp
+/api/redesign  scrape site → LLM brief+theme → Stitch → persist → WhatsApp
 /api/whatsapp/send  send an already-generated redesign
 ```
 
@@ -64,9 +64,28 @@ unexpected happened"). Before changing it, know:
   forward; treating it as failure is wrong.
 - **Model-authored theme tokens must be normalised** (`normalizeTheme`) before
   they reach Stitch. One hallucinated font name fails the entire call.
-- Stitch returns supporting imagery (square tiles, banners) alongside the real
-  page render. `pageLikeScreens()` filters on aspect ratio — a heuristic, marked
-  with a `ponytail:` comment.
+- Stitch mixes supporting imagery into `design.screens` alongside the real page
+  render: square tiles, banners, and design-system colour swatches sized like
+  2x24. `pageLikeScreens()` filters on minimum width *and* aspect ratio — aspect
+  alone lets a 2x24 swatch through. Read screens from **every** design component,
+  not just the first; the page is not reliably first.
+
+## Prompt writing and scraping
+
+- **No browser anywhere.** `site-scraper.ts` reads sites over plain HTTP, using
+  Jina Reader (`r.jina.ai`) when `JINA_API_KEY` is set so JS-rendered pages work.
+  Puppeteer was removed: it only ever existed to feed a vision model, and it was
+  the main source of serverless memory crashes.
+- **Scraping is best-effort.** Social profiles and SPA shells yield only
+  boilerplate; `isUseful` gates that, and the prompt falls back to metadata.
+  Never fail a redesign because the scrape came back empty.
+- **Groq is preferred over OpenRouter** when `GROQ_API_KEY` is set (~2.5s vs
+  10–20s). Groq serves **no general Llama chat model** — its `meta-llama` entries
+  are prompt-guard classifiers, and `llama-3.3-70b-versatile` 404s. Default is
+  `openai/gpt-oss-120b`, a reasoning model that needs a generous `max_tokens` or
+  it returns empty content.
+- **Always send `response_format: {type:"json_object"}`.** Instructions alone are
+  not enough; some models answer with prose and the parse fails.
 
 ## Other traps
 
@@ -74,10 +93,7 @@ unexpected happened"). Before changing it, know:
   size suffix, and do *not* double it. Tall mobile designs (e.g. 780×8636) blow
   past the image server's pixel budget, which returns an HTML error page instead
   of an image, and WhatsApp then fails with Meta error 131053.
-- **Puppeteer** uses a full local Chrome in dev and `@sparticuz/chromium` when
-  `USE_SERVERLESS_CHROMIUM=true` or `process.env.VERCEL` is set. Neither Docker
-  nor Vercel can download Chrome at runtime.
-- **`/api/redesign` takes 2–3 minutes** and declares `maxDuration = 300`. On a
+- **`/api/redesign` takes 100–140s** and declares `maxDuration = 300`. On a
   hosting plan capped below that, it is killed mid-generation. Railway (a normal
   long-lived process) is the safer target.
 - A redesign auto-sends on WhatsApp when it succeeds. **When testing against a
@@ -91,7 +107,7 @@ npm run dev
 npm run lint
 npx tsc --noEmit -p .       # type-check
 node scripts/test-stitch.ts  # Stitch self-checks
-npx tsx scripts/test-csv.ts scripts/test-parser.ts
+npx tsx scripts/test-csv.ts && npx tsx scripts/test-parser.ts && npx tsx scripts/test-scraper.ts
 ```
 
 `src/lib/redesign-prompt.ts` has one pre-existing `@typescript-eslint/no-explicit-any`

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { getBusinesses, updateRedesignResult, updateBusiness, getSettings } from "@/lib/store";
-import { captureScreenshots } from "@/lib/screenshot-helper";
+import { scrapeSite, describeSite } from "@/lib/site-scraper";
 import { writeRedesignPrompt, type RedesignPromptResult } from "@/lib/redesign-prompt";
 import { generateDesign } from "@/lib/stitch";
 import { sendRedesignReadyMessage } from "@/lib/whatsapp";
@@ -40,10 +40,11 @@ export async function POST(request: NextRequest) {
 
     const settings = await getSettings();
 
-    // 1. Pre-flight checks for credentials
-    if (!settings.openrouter_api_key) {
+    // 1. Pre-flight checks for credentials. Either provider can write the
+    // prompt, so only complain when neither is configured.
+    if (!process.env.GROQ_API_KEY && !settings.openrouter_api_key) {
       return Response.json(
-        { error: "OpenRouter API Key is missing. Please configure it in Settings." },
+        { error: "No prompt-writing model configured. Set GROQ_API_KEY, or add an OpenRouter API Key in Settings." },
         { status: 400 }
       );
     }
@@ -60,31 +61,26 @@ export async function POST(request: NextRequest) {
       redesigned_at: new Date().toISOString(),
     });
 
-    // 3. Step A: Capture Screenshots
-    let desktopUrl: string;
-    let mobileUrl: string;
-    try {
-      const crawlResult = await captureScreenshots(business.website, place_id);
-      desktopUrl = crawlResult.desktopUrl;
-      mobileUrl = crawlResult.mobileUrl;
-    } catch (crawlErr) {
-      console.error("Redesign crawl failed:", crawlErr);
-      await updateRedesignResult(place_id, { redesign_status: "failed" });
-      return Response.json(
-        { error: `Crawl/Screenshot failed: ${String(crawlErr)}` },
-        { status: 500 }
-      );
+    // 3. Step A: Scrape the current site for their real services and products.
+    // Best-effort by design — a social-media "website" or a JS-only page yields
+    // nothing readable, and the prompt writer falls back to metadata alone
+    // rather than failing the whole redesign.
+    console.log(`Scraping current site for: ${business.name} (${business.website})`);
+    const site = await scrapeSite(business.website);
+    const siteContent = describeSite(site);
+    if (!site.isUseful) {
+      console.warn(`No readable content scraped from ${business.website}; using metadata only.`);
     }
 
-    // 4. Step B: Vision LLM Prompt Writer
-    console.log(`Analyzing screenshot and writing redesign prompt for: ${business.name}`);
+    // 4. Step B: LLM Prompt Writer
+    console.log(`Writing redesign prompt for: ${business.name}`);
     let brief = "";
     let uniquePrompt = "";
     let theme: RedesignPromptResult["theme"];
     try {
       const promptResult = await writeRedesignPrompt(
         business,
-        desktopUrl,
+        siteContent,
         settings.openrouter_api_key
       );
       brief = promptResult.brief;
@@ -92,10 +88,10 @@ export async function POST(request: NextRequest) {
       theme = promptResult.theme;
       console.log(`Generated prompt: "${uniquePrompt.substring(0, 100)}..."`);
     } catch (promptErr) {
-      console.error("Vision prompt writing failed:", promptErr);
+      console.error("Redesign prompt writing failed:", promptErr);
       await updateRedesignResult(place_id, { redesign_status: "failed" });
       return Response.json(
-        { error: `Vision analysis/prompt writing failed: ${String(promptErr)}` },
+        { error: `Prompt writing failed: ${String(promptErr)}` },
         { status: 500 }
       );
     }
@@ -164,7 +160,7 @@ export async function POST(request: NextRequest) {
       success: true,
       message: "Redesign complete!",
       brief,
-      screenshots: { desktopUrl, mobileUrl },
+      scrapedSite: { usable: site.isUseful, title: site.title, colors: site.colors },
       redesign: { imageUrls, projectId },
       whatsapp,
     });

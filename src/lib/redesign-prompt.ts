@@ -2,7 +2,25 @@ import type { Business } from "@/lib/types";
 import type { StitchTheme } from "@/lib/stitch";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "google/gemini-2.5-flash";
+// Groq is the preferred provider when GROQ_API_KEY is set: same OpenAI-shaped
+// API, ~2.5s for this call versus 10-20s on OpenRouter's free tier, and it
+// honours response_format reliably. Note Groq serves no general Llama chat
+// model — its meta-llama entries are prompt-guard classifiers.
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+// Text-only since the vision step was dropped, so free models are plenty.
+// Named explicitly rather than using `openrouter/free`: that router can land on
+// a content-safety classifier, which answers "User Safety: safe" instead of the
+// JSON we asked for. OpenRouter walks this list in order, which also covers the
+// 429s individual free models return when busy.
+// Set OPENROUTER_MODEL to pin one model (or a paid one) instead.
+// OpenRouter rejects more than three entries in `models`.
+const FREE_MODELS = [
+  "z-ai/glm-5.2:free",
+  "google/gemma-4-31b-it:free",
+  "google/gemma-4-26b-a4b-it:free",
+];
+const PINNED_MODEL = process.env.OPENROUTER_MODEL;
 
 function extractJson(raw: string): unknown {
   const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -18,35 +36,50 @@ export interface RedesignPromptResult {
 }
 
 /**
- * Calls OpenRouter with a vision payload (desktop screenshot + metadata) to analyze the site 
- * and generate a unique, non-templated Stitch redesign prompt.
+ * Writes a unique, non-templated Stitch redesign prompt from the business's
+ * metadata plus whatever we could scrape off their current site.
+ *
+ * Text-only on purpose: this used to send a screenshot to a vision model, which
+ * cost far more tokens and required running headless Chromium just to produce
+ * the image. Scraped copy actually describes their services and products better
+ * than a screenshot did.
  */
 export async function writeRedesignPrompt(
   business: Business,
-  screenshotUrl: string,
+  siteContent: string,
   apiKey: string
 ): Promise<RedesignPromptResult> {
-  if (!apiKey) {
-    throw new Error("OpenRouter API key is missing. Configure it in Settings.");
+  const groqKey = process.env.GROQ_API_KEY;
+  if (!groqKey && !apiKey) {
+    throw new Error("No prompt-writing model configured. Set GROQ_API_KEY, or add an OpenRouter API key in Settings.");
   }
 
+  // Instagram-as-website, SPA shells and dead domains all scrape to nothing —
+  // say so explicitly rather than leaving a confusing empty section.
+  const siteSection = siteContent
+    ? `Here is the content scraped from their current website. Use their real services, products and wording:\n${siteContent}`
+    : `Their current website could not be read (it may be a social page or require JavaScript). Work from the metadata above alone and do not invent specific products or prices.`;
+
   const systemInstructions = `You are an expert UI/UX design critic and prompt engineer.
-Analyze the provided screenshot of the business's current website, along with their metadata:
+A local business needs its website redesigned. Their details:
 - Name: "${business.name}"
 - Category: "${business.category}"
 - Short Description: "${business.short_description || 'None'}"
 
+${siteSection}
+
 Perform two tasks:
-1. Write a short, critical design "brief" (~2-3 sentences) explaining:
-   - What looks dated or visually cluttered about the current site.
-   - What brand colors/vibes we should keep.
+1. Write a short "brief" (~2-3 sentences) explaining:
+   - What this business actually offers, based on the content above.
+   - What brand colors/vibes suit them.
    - What tone/aesthetic (e.g. premium cafe, rustic bakery, clinical dentistry) is appropriate.
 2. Write one unique, tailored "prompt" (~1-2 paragraphs) for a UI generator called Stitch to redesign this website.
    - Describe a modern, mobile-friendly landing page layout.
    - Detail the colors, typography, spacing, and key sections (e.g. hero, booking, specials).
-   - Incorporate concrete visual details from your analysis, but describe them fully in words — spell out exact colors, layout, and imagery yourself.
+   - Name their real services, products or specialities from the scraped content wherever you can — that specificity is the whole point.
+   - Spell out exact colors, layout and imagery in words.
    - Do NOT use standard templates or generic descriptions. Customize it completely to this specific business's theme.
-   - Stitch never sees the screenshot, only this text. Never write phrases like "the provided image", "as shown above", or "similar to the logo in the screenshot" — Stitch has nothing to resolve those references against and the generation fails.
+   - Stitch sees only this text — never write "the provided image", "as shown above", or any reference to something it cannot see, or the generation fails.
 
 3. Pick the design-system theme tokens that suit this business. Choose ONLY from these exact values:
    - colorMode: "LIGHT" or "DARK"
@@ -70,32 +103,29 @@ Respond with ONLY a JSON object (no markdown formatting, no explanations) contai
   }
 }`;
 
-  console.log(`Calling OpenRouter vision LLM to write prompt for: ${business.name}`);
+  const provider = groqKey ? "Groq" : "OpenRouter";
+  console.log(`Calling ${provider} to write redesign prompt for: ${business.name}`);
 
-  const res = await fetch(OPENROUTER_URL, {
+  const res = await fetch(groqKey ? GROQ_URL : OPENROUTER_URL, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${groqKey ?? apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 1000,
+      model: groqKey ? GROQ_MODEL : PINNED_MODEL ?? FREE_MODELS[0],
+      // OpenRouter falls through this list when a model is busy or errors.
+      ...(groqKey || PINNED_MODEL ? {} : { models: FREE_MODELS }),
+      // Free models include reasoning ones that spend output tokens thinking
+      // before answering; too low a cap truncates the JSON mid-string.
+      max_tokens: 2000,
+      // Ask for JSON mode explicitly — instructions alone are not enough, some
+      // models reply with prose regardless.
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "user",
-          content: [
-            {
-              type: "text",
-              text: systemInstructions,
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: screenshotUrl,
-              },
-            },
-          ],
+          content: systemInstructions,
         },
       ],
     }),
@@ -103,13 +133,13 @@ Respond with ONLY a JSON object (no markdown formatting, no explanations) contai
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`OpenRouter vision call failed: ${res.status} - ${errText}`);
+    throw new Error(`${provider} call failed: ${res.status} - ${errText}`);
   }
 
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content?.trim();
   if (!content) {
-    throw new Error("OpenRouter returned no response content.");
+    throw new Error(`${provider} returned no response content.`);
   }
 
   try {
@@ -123,7 +153,7 @@ Respond with ONLY a JSON object (no markdown formatting, no explanations) contai
       theme: parsed.theme,
     };
   } catch (err) {
-    console.error("Failed to parse OpenRouter vision output:", content);
+    console.error(`Failed to parse ${provider} output:`, content);
     throw new Error(`Failed to extract structured design prompt: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

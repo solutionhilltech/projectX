@@ -8,7 +8,7 @@ The whole flow is three steps, each usable on its own from the dashboard:
 | Step | What happens | Entry point |
 | --- | --- | --- |
 | **1. Scout** | An LLM turns a plain-English query ("cafes in Solan") into a search plan, runs it against a places provider, and saves the results. Streams progress to the UI over SSE. | `GET /api/search` |
-| **2. Redesign** | Crawls the business's current site with Puppeteer, screenshots desktop + mobile, has a vision model write a bespoke design brief, then generates a new UI in Google Stitch. | `POST /api/redesign` |
+| **2. Redesign** | Scrapes the business's current site for their real services and products, has an LLM write a bespoke design brief and theme, then generates a new UI in Google Stitch. | `POST /api/redesign` |
 | **3. Deliver** | Sends the finished mockup to the business's WhatsApp number via the Meta Cloud API. | `POST /api/whatsapp/send` |
 
 Step 2 runs steps 2 and 3 together: a successful redesign auto-sends on WhatsApp.
@@ -46,17 +46,17 @@ variable acts as the seed value until an override is saved.
 | --- | --- |
 | `AUTH_SECRET` | HMAC key for signing session cookies. |
 | `MONGODB_URI` | Connection string. Holds `businesses`, `settings` and `auth_users`. |
-| `OPENROUTER_API_KEY` | Search planning and the vision model that writes redesign prompts. |
+| `OPENROUTER_API_KEY` | Search planning. Also writes redesign prompts when `GROQ_API_KEY` is unset. |
 
 ### Per-feature
 
 | Variable | Needed for |
 | --- | --- |
 | `GOOGLE_PLACES_API_KEY` | The default `google` search provider. |
-| `UPLOADTHING_TOKEN` | Hosting site screenshots — WhatsApp needs a publicly fetchable URL. |
+| `GROQ_API_KEY` | Preferred prompt writer — faster and more reliable than OpenRouter's free tier. Falls back to OpenRouter when unset. `GROQ_MODEL` overrides the default `openai/gpt-oss-120b`. |
+| `JINA_API_KEY` | Optional. Jina Reader renders pages (JavaScript included) to markdown, so SPAs scrape properly. Without it the scraper uses a plain fetch of the raw HTML. |
 | `STITCH_MCP_URL`, `STITCH_API_KEY` | Google Stitch design generation. If either is missing the redesign route runs in **mock mode** and returns placeholder images. |
 | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID` | Sending messages. Also `WHATSAPP_BUSINESS_ACCOUNT_ID` and `META_APP_ID` for template management. |
-| `USE_SERVERLESS_CHROMIUM` | Set to `true` in Docker so Puppeteer uses the bundled headless Chromium instead of a full Chrome download. Auto-detected on Vercel. |
 | `STITCH_OAUTH_CLIENT_ID`, `STITCH_OAUTH_CLIENT_SECRET`, `STITCH_OAUTH_SCOPES`, `GOOGLE_CLOUD_PROJECT` | Optional. Authenticate Stitch as a Google user instead of by API key, via the one-time flow at `/api/stitch/auth`. Unset by default. |
 
 ## Scripts
@@ -69,7 +69,8 @@ npm run lint     # eslint
 
 # Self-checks (no test framework — see "Testing" below)
 npx tsx scripts/test-csv.ts       # CSV export escaping
-npx tsx scripts/test-parser.ts    # vision-output JSON parsing
+npx tsx scripts/test-parser.ts    # LLM-output JSON parsing
+npx tsx scripts/test-scraper.ts   # website scraping / HTML extraction
 node scripts/test-stitch.ts       # Stitch theme + screen filtering
 
 # One-offs
@@ -100,8 +101,8 @@ src/
     store.ts           MongoDB access; the only data layer
     search-providers.ts  Pluggable place lookup (google, osm, maps scraper)
     openrouter.ts      LLM search planning
-    screenshot-helper  Puppeteer crawl + UploadThing upload
-    redesign-prompt.ts Vision model → design brief, Stitch prompt and theme tokens
+    site-scraper.ts    Reads the business's current site (Jina Reader, else plain fetch)
+    redesign-prompt.ts LLM → design brief, Stitch prompt and theme tokens
     stitch.ts          Google Stitch design generation
     whatsapp.ts        Meta Cloud API delivery
   proxy.ts         Auth gate for every route
@@ -112,8 +113,8 @@ scripts/           Self-check runners and one-off admin tasks
 
 **Railway / Docker** (`railway.json`, `Dockerfile`) is the primary target. The
 image is multi-stage: Next builds in `standalone` mode and the runner ships only
-traced files plus `@sparticuz/chromium`, whose Brotli-compressed browser is
-inflated to `/tmp` at startup. Health check: `GET /api/status`.
+the traced files. No browser is installed — the redesign step reads sites over
+plain HTTP. Health check: `GET /api/status`.
 
 **Vercel** works, with one caveat: the redesign route declares
 `maxDuration = 300`, and a full run takes roughly 2–3 minutes. Your plan must
@@ -122,8 +123,8 @@ mid-generation. Long crawl-plus-generate work is a better fit for Railway.
 
 ## Notes
 
-- Redesign runs are slow by nature (crawl → vision model → design generation).
-  The UI keeps the trigger button disabled for the duration; there is no job queue.
+- Redesign runs take roughly 100-140s (scrape → LLM → design generation). The UI
+  keeps the trigger button disabled for the duration; there is no job queue.
 - Google Stitch is an experimental Google Labs product. Its API is occasionally
   flaky — `create_project` is retried, and generation is polled rather than
   retried, per Google's own guidance. See `CLAUDE.md` for the details.
