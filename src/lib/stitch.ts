@@ -178,7 +178,21 @@ export async function generateDesign(params: {
     const stitch = new Stitch(client);
 
     console.log(`Creating project in Stitch for: ${params.businessName}`);
-    const created = await stitch.createProject(`${params.businessName} Redesign`);
+    // create_project intermittently rejects a perfectly valid title with
+    // "Request contains an invalid argument"; retrying clears it. Safe to retry
+    // (a failed create leaves no project) — unlike generate_screen_from_text,
+    // which Stitch's docs explicitly say must never be retried.
+    let created;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        created = await stitch.createProject(`${params.businessName} Redesign`);
+        break;
+      } catch (err) {
+        if (attempt >= 3) throw err;
+        console.warn(`create_project attempt ${attempt} failed; retrying.`, err instanceof Error ? err.message : err);
+        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+      }
+    }
     const projectId = created.projectId || String(created.data?.name || "").split("/").pop() || "";
     if (!projectId) {
       throw new Error(`Failed to retrieve project ID from create_project response: ${JSON.stringify(created.data)}`);
