@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { getBusinesses, updateRedesignResult, updateBusiness, getSettings } from "@/lib/store";
 import { captureScreenshots } from "@/lib/screenshot-helper";
-import { writeRedesignPrompt } from "@/lib/redesign-prompt";
+import { writeRedesignPrompt, type RedesignPromptResult } from "@/lib/redesign-prompt";
 import { generateDesign } from "@/lib/stitch";
 import { sendRedesignReadyMessage } from "@/lib/whatsapp";
 
@@ -11,27 +11,6 @@ export const runtime = "nodejs"; // puppeteer needs Node APIs, not Edge
 // Vercel's default timeout. Raise to your plan's actual cap in the Vercel
 // dashboard/project settings — this is a floor, not a guarantee.
 export const maxDuration = 300;
-
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  retries = 3,
-  delayMs = 2000
-): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await fn();
-    } catch (err) {
-      attempt++;
-      if (attempt >= retries) {
-        throw err;
-      }
-      console.warn(`Stitch generation attempt ${attempt} failed. Retrying in ${delayMs}ms... Error:`, err);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-      delayMs *= 2;
-    }
-  }
-}
 
 export async function POST(request: NextRequest) {
   let businessId = "";
@@ -101,6 +80,7 @@ export async function POST(request: NextRequest) {
     console.log(`Analyzing screenshot and writing redesign prompt for: ${business.name}`);
     let brief = "";
     let uniquePrompt = "";
+    let theme: RedesignPromptResult["theme"];
     try {
       const promptResult = await writeRedesignPrompt(
         business,
@@ -109,6 +89,7 @@ export async function POST(request: NextRequest) {
       );
       brief = promptResult.brief;
       uniquePrompt = promptResult.prompt;
+      theme = promptResult.theme;
       console.log(`Generated prompt: "${uniquePrompt.substring(0, 100)}..."`);
     } catch (promptErr) {
       console.error("Vision prompt writing failed:", promptErr);
@@ -119,7 +100,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 5. Step C: Generate Design in Stitch (with retries)
+    // 5. Step C: Generate Design in Stitch (single attempt — Stitch's tool docs
+    // say DO NOT RETRY; generateDesign polls for the result internally instead)
     console.log(`Calling Stitch MCP client for design generation...`);
     let imageUrls: string[] = [];
     let projectId = "";
@@ -133,21 +115,21 @@ export async function POST(request: NextRequest) {
         ];
         console.log(`[MOCK MODE] Project generated: ${projectId}`);
       } else {
-        const designResult = await retryWithBackoff(() =>
-          generateDesign({
-            businessName: business.name,
-            prompt: uniquePrompt,
-          })
-        );
+        const designResult = await generateDesign({
+          businessName: business.name,
+          prompt: uniquePrompt,
+          theme,
+          refreshToken: settings.stitch_refresh_token || undefined,
+        });
         imageUrls = designResult.imageUrls;
         projectId = designResult.projectId;
         console.log(`Stitch generation successful! Project ID: ${projectId}, Screens: ${imageUrls.length}`);
       }
     } catch (stitchErr) {
-      console.error("Stitch redesign generation failed after retries:", stitchErr);
+      console.error("Stitch redesign generation failed:", stitchErr);
       await updateRedesignResult(place_id, { redesign_status: "failed" });
       return Response.json(
-        { error: `Stitch design generation failed: ${String(stitchErr)}` },
+        { error: "Stitch couldn't generate a design right now. Please try again in a bit." },
         { status: 500 }
       );
     }

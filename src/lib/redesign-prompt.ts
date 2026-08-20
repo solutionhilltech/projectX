@@ -1,4 +1,5 @@
 import type { Business } from "@/lib/types";
+import type { StitchTheme } from "@/lib/stitch";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MODEL = "google/gemini-2.5-flash";
@@ -12,6 +13,8 @@ function extractJson(raw: string): unknown {
 export interface RedesignPromptResult {
   brief: string;
   prompt: string;
+  /** Raw model-chosen theme tokens; normalised against Stitch's enums in stitch.ts. */
+  theme?: Partial<StitchTheme>;
 }
 
 /**
@@ -41,13 +44,30 @@ Perform two tasks:
 2. Write one unique, tailored "prompt" (~1-2 paragraphs) for a UI generator called Stitch to redesign this website.
    - Describe a modern, mobile-friendly landing page layout.
    - Detail the colors, typography, spacing, and key sections (e.g. hero, booking, specials).
-   - Incorporate concrete visual details from your analysis.
+   - Incorporate concrete visual details from your analysis, but describe them fully in words — spell out exact colors, layout, and imagery yourself.
    - Do NOT use standard templates or generic descriptions. Customize it completely to this specific business's theme.
+   - Stitch never sees the screenshot, only this text. Never write phrases like "the provided image", "as shown above", or "similar to the logo in the screenshot" — Stitch has nothing to resolve those references against and the generation fails.
+
+3. Pick the design-system theme tokens that suit this business. Choose ONLY from these exact values:
+   - colorMode: "LIGHT" or "DARK"
+   - headlineFont / bodyFont: INTER, MANROPE, PLUS_JAKARTA_SANS, SPACE_GROTESK, WORK_SANS, DM_SANS,
+     SORA, OUTFIT, LEXEND, RUBIK, KARLA, EPILOGUE, GEIST, SYNE, MONTSERRAT, RALEWAY, QUICKSAND,
+     COMFORTAA, OSWALD, BEBAS_NEUE, ANTON, PLAYFAIR_DISPLAY, EB_GARAMOND, LIBRE_CASLON_TEXT,
+     MERRIWEATHER, NOTO_SERIF
+   - roundness: "ROUND_TWO", "ROUND_FOUR", "ROUND_EIGHT", "ROUND_TWELVE" or "ROUND_FULL"
+   - customColor: the brand's primary colour as a 6-digit hex string, e.g. "#8B4513"
 
 Respond with ONLY a JSON object (no markdown formatting, no explanations) containing these exact keys:
 {
   "brief": "Your short design analysis here",
-  "prompt": "Your unique Stitch redesign prompt here"
+  "prompt": "Your unique Stitch redesign prompt here",
+  "theme": {
+    "colorMode": "LIGHT",
+    "headlineFont": "PLAYFAIR_DISPLAY",
+    "bodyFont": "INTER",
+    "roundness": "ROUND_TWELVE",
+    "customColor": "#8B4513"
+  }
 }`;
 
   console.log(`Calling OpenRouter vision LLM to write prompt for: ${business.name}`);
@@ -100,6 +120,7 @@ Respond with ONLY a JSON object (no markdown formatting, no explanations) contai
     return {
       brief: parsed.brief,
       prompt: parsed.prompt,
+      theme: parsed.theme,
     };
   } catch (err) {
     console.error("Failed to parse OpenRouter vision output:", content);
